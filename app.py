@@ -5,6 +5,7 @@ import io
 import math
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.utils import get_column_letter
 
 # ------------------------------
 # 一、全局核心配置
@@ -410,6 +411,212 @@ def parse_work_hours_upload(uploaded_file, start_date, end_date, default_work_ho
         return hours_df, []
 
     raise ValueError("未找到“日期 / 单班组单日工时”两列。")
+
+def build_formula_schedule_excel(
+    schedule_df,
+    work_hours_plan_df,
+    material_plan_df,
+    selected_process,
+    schedule_start_date,
+    demand_end_date,
+    lead_time_days,
+    rest_dates_set,
+    material_schedule_enabled,
+):
+    wb = Workbook()
+    ws = wb.active
+    ws.title = f"{selected_process}排产表"[:31]
+
+    header_fill = PatternFill("solid", fgColor="F3F6FA")
+    input_fill = PatternFill("solid", fgColor="EAF2FF")
+    formula_fill = PatternFill("solid", fgColor="FFF7E6")
+    thin_side = Side(style="thin", color="D9E2EF")
+    border = Border(left=thin_side, right=thin_side, top=thin_side, bottom=thin_side)
+
+    def is_number(value):
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+    def excel_number(value):
+        if isinstance(value, float) and value.is_integer():
+            return str(int(value))
+        return str(value)
+
+    def cell_ref(row_idx, col_idx, absolute=False):
+        col = get_column_letter(col_idx)
+        return f"${col}${row_idx}" if absolute else f"{col}{row_idx}"
+
+    for col_idx, col_name in enumerate(schedule_df.columns, start=1):
+        cell = ws.cell(row=1, column=col_idx, value=col_name)
+        cell.font = Font(bold=True, color="172033")
+        cell.fill = header_fill
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        cell.border = border
+
+    for row_offset, (_, row) in enumerate(schedule_df.iterrows(), start=2):
+        for col_idx, value in enumerate(row.tolist(), start=1):
+            if pd.isna(value):
+                value = ""
+            cell = ws.cell(row=row_offset, column=col_idx, value=value)
+            cell.border = border
+            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+    row_by_label = {}
+    for row_idx in range(2, ws.max_row + 1):
+        label = str(ws.cell(row=row_idx, column=1).value or "")
+        row_by_label[label] = row_idx
+
+    date_start_col = 3
+    full_date_list = generate_full_date_list(schedule_start_date, demand_end_date)
+    date_count = min(len(schedule_df.columns[2:]), len(full_date_list))
+    date_end_col = date_start_col + date_count - 1
+
+    shift_rows = [
+        row_idx for row_idx in range(2, ws.max_row + 1)
+        if str(ws.cell(row=row_idx, column=1).value or "").startswith("班组")
+    ]
+    old_shift_rows = [
+        row_idx for row_idx in shift_rows
+        if "老班组" in str(ws.cell(row=row_idx, column=1).value or "")
+    ]
+
+    formula_row_labels = {"当日可用物料", "老班组后累计物料gap", "累计物料gap", "累计产量", "成品转化累计"}
+    material_arrival_row = row_by_label.get("预计到料数量")
+    material_available_row = row_by_label.get("当日可用物料")
+    material_gap_row = row_by_label.get("累计物料gap")
+    old_material_gap_row = row_by_label.get("老班组后累计物料gap")
+    cumulative_row = row_by_label.get("累计产量")
+    convert_row = row_by_label.get("成品转化累计")
+
+    effective_arrival_source = {}
+    if material_arrival_row is not None:
+        for src_idx, src_date in enumerate(full_date_list[:date_count]):
+            available_date = get_next_workday(src_date, 1, rest_dates_set)
+            if available_date in full_date_list:
+                target_idx = full_date_list.index(available_date)
+                if target_idx < date_count:
+                    effective_arrival_source.setdefault(target_idx, []).append(src_idx)
+
+    def sum_rows_formula(rows, col_idx):
+        refs = [cell_ref(row_idx, col_idx) for row_idx in rows]
+        return f"SUM({','.join(refs)})" if refs else "0"
+
+    def effective_arrival_formula(day_idx):
+        source_indices = effective_arrival_source.get(day_idx, [])
+        terms = [cell_ref(material_arrival_row, date_start_col + src_idx) for src_idx in source_indices]
+        return "+".join(terms) if terms else "0"
+
+    # 普通数值也写成公式，方便用户在 Excel 中追踪和二次调整。
+    for row_idx in range(2, ws.max_row + 1):
+        label = str(ws.cell(row=row_idx, column=1).value or "")
+        for col_idx in range(2, ws.max_column + 1):
+            cell = ws.cell(row=row_idx, column=col_idx)
+            value = cell.value
+            if label in formula_row_labels:
+                continue
+            if is_number(value):
+                cell.value = f"={excel_number(value)}"
+                cell.fill = input_fill if col_idx == 2 else formula_fill
+
+    if material_available_row and material_gap_row and material_arrival_row:
+        for day_idx in range(date_count):
+            col_idx = date_start_col + day_idx
+            cell = ws.cell(row=material_available_row, column=col_idx)
+            if day_idx == 0:
+                base_ref = cell_ref(material_available_row, 2, absolute=True)
+                cell.value = f"={base_ref}+{effective_arrival_formula(day_idx)}"
+            else:
+                previous_gap = cell_ref(material_gap_row, col_idx - 1)
+                cell.value = f"={previous_gap}+{effective_arrival_formula(day_idx)}"
+            cell.fill = formula_fill
+
+    if old_material_gap_row and material_available_row:
+        for col_idx in range(date_start_col, date_end_col + 1):
+            ws.cell(row=old_material_gap_row, column=col_idx).value = (
+                f"=MAX(0,{cell_ref(material_available_row, col_idx)}-{sum_rows_formula(old_shift_rows, col_idx)})"
+            )
+            ws.cell(row=old_material_gap_row, column=col_idx).fill = formula_fill
+
+    if material_gap_row and material_available_row:
+        for col_idx in range(date_start_col, date_end_col + 1):
+            ws.cell(row=material_gap_row, column=col_idx).value = (
+                f"=MAX(0,{cell_ref(material_available_row, col_idx)}-{sum_rows_formula(shift_rows, col_idx)})"
+            )
+            ws.cell(row=material_gap_row, column=col_idx).fill = formula_fill
+
+    if cumulative_row:
+        initial_cell = ws.cell(row=cumulative_row, column=2)
+        if is_number(initial_cell.value):
+            initial_cell.value = f"={excel_number(initial_cell.value)}"
+        for col_idx in range(date_start_col, date_end_col + 1):
+            ws.cell(row=cumulative_row, column=col_idx).value = (
+                f"={cell_ref(cumulative_row, col_idx - 1)}+{sum_rows_formula(shift_rows, col_idx)}"
+            )
+            ws.cell(row=cumulative_row, column=col_idx).fill = formula_fill
+
+    if convert_row:
+        if cumulative_row:
+            ws.cell(row=convert_row, column=2).value = f"={cell_ref(cumulative_row, 2)}"
+        completion_sources = {}
+        for prod_idx, prod_date in enumerate(full_date_list[:date_count]):
+            complete_date = get_next_workday(prod_date, int(lead_time_days), rest_dates_set)
+            if complete_date in full_date_list:
+                complete_idx = full_date_list.index(complete_date)
+                if complete_idx < date_count:
+                    completion_sources.setdefault(complete_idx, []).append(prod_idx)
+        for day_idx in range(date_count):
+            col_idx = date_start_col + day_idx
+            addition_terms = [
+                sum_rows_formula(shift_rows, date_start_col + src_idx)
+                for src_idx in completion_sources.get(day_idx, [])
+            ]
+            additions = "+".join(addition_terms) if addition_terms else "0"
+            ws.cell(row=convert_row, column=col_idx).value = f"={cell_ref(convert_row, col_idx - 1)}+{additions}"
+            ws.cell(row=convert_row, column=col_idx).fill = formula_fill
+
+    for row_idx in range(2, ws.max_row + 1):
+        label = str(ws.cell(row=row_idx, column=1).value or "")
+        if label in formula_row_labels:
+            ws.cell(row=row_idx, column=1).font = Font(bold=True, color="172033")
+        for col_idx in range(1, ws.max_column + 1):
+            ws.cell(row=row_idx, column=col_idx).border = border
+
+    ws.freeze_panes = "C2"
+    ws.column_dimensions["A"].width = 24
+    ws.column_dimensions["B"].width = 14
+    for col_idx in range(3, ws.max_column + 1):
+        ws.column_dimensions[get_column_letter(col_idx)].width = 14
+
+    def write_dataframe_sheet(sheet_name, df):
+        sheet = wb.create_sheet(sheet_name[:31])
+        if df is None or df.empty:
+            return
+        for col_idx, col_name in enumerate(df.columns, start=1):
+            cell = sheet.cell(row=1, column=col_idx, value=col_name)
+            cell.font = Font(bold=True)
+            cell.fill = header_fill
+            cell.border = border
+        for row_idx, (_, row) in enumerate(df.iterrows(), start=2):
+            for col_idx, value in enumerate(row.tolist(), start=1):
+                if pd.isna(value):
+                    value = ""
+                cell = sheet.cell(row=row_idx, column=col_idx, value=value)
+                cell.border = border
+        for col_idx in range(1, sheet.max_column + 1):
+            sheet.column_dimensions[get_column_letter(col_idx)].width = 18
+
+    write_dataframe_sheet("单日工时输入", work_hours_plan_df)
+    if material_schedule_enabled:
+        write_dataframe_sheet("物料交期输入", material_plan_df)
+
+    try:
+        wb.calculation.fullCalcOnLoad = True
+        wb.calculation.forceFullCalc = True
+    except Exception:
+        pass
+
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    return buffer.getvalue()
 
 def parse_work_hours_plan(work_hours_plan_df, default_work_hours):
     plan = {}
@@ -2944,16 +3151,21 @@ if st.button(f"开始【{selected_process}】制程排产", type="primary", use_
 
         st.dataframe(schedule_df, use_container_width=True, height=500)
 
-        # Excel导出
-        buffer = io.BytesIO()
-        with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-            schedule_df.to_excel(writer, sheet_name=f'{selected_process}排产表', index=False)
-            work_hours_plan_df.to_excel(writer, sheet_name='单日工时输入', index=False)
-            if material_schedule_enabled:
-                material_plan_df.to_excel(writer, sheet_name='物料交期输入', index=False)
+        # Excel导出：主排产表写入可追踪公式，便于下载后复核和二次测算。
+        excel_bytes = build_formula_schedule_excel(
+            schedule_df=schedule_df,
+            work_hours_plan_df=work_hours_plan_df,
+            material_plan_df=material_plan_df,
+            selected_process=selected_process,
+            schedule_start_date=schedule_start_date,
+            demand_end_date=demand_end_date,
+            lead_time_days=lead_time_days,
+            rest_dates_set=rest_dates_set,
+            material_schedule_enabled=material_schedule_enabled,
+        )
         st.download_button(
             label=f"下载【{selected_process}】制程排产表Excel",
-            data=buffer.getvalue(),
+            data=excel_bytes,
             file_name=f"{selected_process}制程_智能排产计划表_{datetime.now().strftime('%Y%m%d%H%M')}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
