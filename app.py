@@ -1721,7 +1721,7 @@ def schedule_engine(
             if shift["daily_prod"][day_idx] == "当日放空":
                 shift["daily_prod"][day_idx] = ""
 
-    # 显示层标记：班组后续不再生产时，只在第一个有效工作日标记释放。
+    # 显示层标记：班组后续不再生产时，需等最后产出完成 Lead Time 转化后才标记释放。
     for shift in final_shifts:
         if shift["is_new"]:
             continue
@@ -1732,8 +1732,10 @@ def schedule_engine(
         if not produced_indices:
             continue
         last_prod_idx = produced_indices[-1]
+        release_date = get_next_workday(full_date_list[last_prod_idx], int(lead_time_days), rest_dates_set)
+        release_start_idx = date_to_idx.get(release_date, total_days)
         release_marked = False
-        for day_idx in range(last_prod_idx + 1, total_days):
+        for day_idx in range(max(last_prod_idx + 1, release_start_idx), total_days):
             if not date_workday_flag[day_idx] or int(daily_shift_capacity[day_idx]) <= 0:
                 continue
             current_val = shift["daily_prod"][day_idx]
