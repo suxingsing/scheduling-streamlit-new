@@ -1331,7 +1331,7 @@ def schedule_engine(
                 if str(shift["daily_prod"][day_idx]).strip() == "":
                     shift["daily_prod"][day_idx] = "当日放空"
 
-    def convert_non_continuous_old_shifts_to_new():
+    def convert_non_continuous_old_shifts_to_new(include_last_old_shift=False):
         nonlocal daily_scheduled, remaining_demand, final_shift_total, run_mode, message
 
         old_shifts = [shift for shift in shifts_production if not shift["is_new"]]
@@ -1341,7 +1341,7 @@ def schedule_engine(
             if current_material_gap and min(current_material_gap) > 0:
                 return 0, 0, 0
         for idx, shift in enumerate(old_shifts):
-            if material_enabled and idx == len(old_shifts) - 1:
+            if material_enabled and idx == len(old_shifts) - 1 and not include_last_old_shift:
                 continue
             idle_days = count_idle_before_completion(shift, daily_scheduled)
             if idle_days > idle_convert_threshold_days:
@@ -1643,6 +1643,9 @@ def schedule_engine(
             prioritize_old_shifts_and_cap_material()
         reschedule_old_first_then_new()
         prioritize_old_shifts_and_cap_material()
+        converted_count, _, _ = convert_non_continuous_old_shifts_to_new(include_last_old_shift=True)
+        if converted_count > 0:
+            prioritize_old_shifts_and_cap_material()
     normalize_shift_idle_display()
 
     # ============================
