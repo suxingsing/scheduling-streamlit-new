@@ -539,7 +539,7 @@ def build_schedule_insights(
         conclusions.append(f"本次排产可覆盖目标，计划产出 {planned_output:,} 件，目标 {int(production_target):,} 件。")
 
     if len(new_shift_rows) > 0:
-        conclusions.append(f"系统启用了 {len(new_shift_rows)} 个新班组，新班组按爬坡曲线进行连续倒排。")
+        conclusions.append(f"系统启用了 {len(new_shift_rows)} 个新班组，新班组按爬坡曲线从启用日连续正排。")
     else:
         conclusions.append(f"当前方案仅使用老班组，启用老班组 {len(old_shift_rows)} 个。")
 
@@ -555,7 +555,7 @@ def build_schedule_insights(
     if shortage > 0:
         suggestions.append("优先补充物料到料、增加可用工时或延长排产周期，然后重新排产。")
     elif "新班组" in mode:
-        suggestions.append("建议复核新增班组的人员到位时间和爬坡比例，确认倒排启动日期可执行。")
+        suggestions.append("建议复核新增班组的人员到位时间和爬坡比例，确认连续正排启动日期可执行。")
     elif total_exist_capacity > production_target:
         suggestions.append("当前目标已覆盖，可按业务需要复核班组启用数量或加班安排。")
 
@@ -1000,7 +1000,7 @@ def schedule_engine(
             if best_start is None:
                 break
 
-            shift = init_shift(f"班组{shift_no}(新班组-连续倒排)", True, fill_idle=False)
+            shift = init_shift(f"班组{shift_no}(新班组-连续正排)", True, fill_idle=False)
             produced = place_sequence(shift, best_start, best_sequence)
             shifts_production.append(shift)
             remaining -= produced
@@ -1284,13 +1284,6 @@ def schedule_engine(
                     if numeric_prod(other_shift["daily_prod"][source_day_idx]) > 0:
                         candidates.append((other_shift, source_day_idx))
 
-            for new_shift in [shift for shift in shifts_production if shift["is_new"]]:
-                for source_day_idx in production_workday_indices:
-                    if source_day_idx < target_day_idx:
-                        continue
-                    if numeric_prod(new_shift["daily_prod"][source_day_idx]) > 0:
-                        candidates.append((new_shift, source_day_idx))
-
             return candidates
 
         moved = True
@@ -1335,6 +1328,8 @@ def schedule_engine(
     def normalize_shift_idle_display():
         for shift in shifts_production:
             if is_shift_empty(shift["daily_prod"]):
+                continue
+            if shift["is_new"]:
                 continue
             for day_idx in production_workday_indices:
                 if int(daily_shift_capacity[day_idx]) <= 0:
@@ -1383,10 +1378,10 @@ def schedule_engine(
 
         converted_count = len(converted_shifts)
         if new_total > 0:
-            run_mode = "场景二/四：物料连续缺口，老班组顺序正排 + 新班组爬坡倒排模式"
+            run_mode = "场景二/四：物料连续缺口，老班组顺序正排 + 新班组爬坡正排模式"
             message = (
                 f"✅ 排产完成 | {run_mode} | 第{first_convert_idx + 1}个及后续老班组"
-                f"生产完成前累计放空超过{idle_convert_threshold_days}天，已按新班组爬坡倒排处理"
+                f"生产完成前累计放空超过{idle_convert_threshold_days}天，已按新班组爬坡正排处理"
             )
         if remaining_after_new > 0:
             message = (
@@ -1419,7 +1414,7 @@ def schedule_engine(
         remaining_demand = remaining_after_new
 
         if new_total > 0:
-            run_mode = "场景二/四：物料连续缺口，老班组顺序正排 + 新班组爬坡倒排模式"
+            run_mode = "场景二/四：物料连续缺口，老班组顺序正排 + 新班组爬坡正排模式"
             if remaining_after_new > 0:
                 message = (
                     f"⚠️ 排产未完全覆盖 | {run_mode} | 已按新班组补排{new_total:,}件，"
@@ -1536,7 +1531,7 @@ def schedule_engine(
         remaining_after_new, new_total = add_new_reverse_shifts(target_qty, reset_existing=False)
         final_shift_total += new_total
         remaining_demand += remaining_after_new
-        run_mode = "场景二/四：物料连续缺口，老班组顺序正排 + 新班组爬坡倒排模式"
+        run_mode = "场景二/四：物料连续缺口，老班组顺序正排 + 新班组爬坡正排模式"
         if remaining_after_new > 0:
             message = (
                 f"⚠️ 排产未完全覆盖 | {run_mode} | 最后一个老班组因缺料放空超过{idle_convert_threshold_days}天，"
@@ -1545,7 +1540,7 @@ def schedule_engine(
         else:
             message = (
                 f"✅ 排产完成 | {run_mode} | 最后一个老班组因缺料放空超过{idle_convert_threshold_days}天，"
-                f"已按新班组爬坡倒排处理"
+                f"已按新班组爬坡正排处理"
             )
         return 1, new_total, delay_days
 
@@ -1601,7 +1596,7 @@ def schedule_engine(
         if remaining_demand > 0:
             message = f"⚠️ 排产未完全覆盖 | {run_mode} | 受物料交期或生产窗口约束，仍有{remaining_demand:,}件未排完"
         elif final_shift_total > 0:
-            message = f"✅ 排产完成 | {run_mode} | 老班组正排存在物料缺口，已启用新班组倒排补足"
+            message = f"✅ 排产完成 | {run_mode} | 老班组正排存在物料缺口，已启用新班组连续正排补足"
         else:
             reduced_count = existing_shift_count - selected_old_count
             message = f"✅ 排产完成 | {run_mode} | 启用老班组{selected_old_count}个，减少{reduced_count}个 | 老班组工作日放空{idle_days}天"
@@ -1610,7 +1605,7 @@ def schedule_engine(
     # 场景2：产能不足
     # ============================
     else:
-        run_mode = "新增班组模式（产能不足，收尾班组严格遵循爬坡规则倒排）"
+        run_mode = "新增班组模式（产能不足，新增班组严格遵循爬坡规则连续正排）"
         shifts_production, daily_scheduled, remaining_demand = run_old_forward_schedule(existing_shift_count, production_target)
 
         final_shift_total = 0
@@ -1619,7 +1614,7 @@ def schedule_engine(
         old_shift_count_after = len(shifts_production)
         remaining_demand, final_shift_total = add_new_reverse_shifts(remaining_demand, reset_existing=False) if remaining_demand > 0 else (0, 0)
         if old_shift_count_after and final_shift_total > 0:
-            run_mode = "老班组正排 + 新班组连续倒排模式"
+            run_mode = "老班组正排 + 新班组连续正排模式"
         if remaining_demand > 0 and final_shift_total <= 0:
             message = f"⚠️ 排产未完全覆盖 | {run_mode} | 受物料交期约束，仍有{remaining_demand:,}件未排完"
         else:
@@ -1708,7 +1703,7 @@ def schedule_engine(
         if not is_shift_empty(shift["daily_prod"]):
             final_shifts.append(shift)
     for display_no, shift in enumerate(final_shifts, start=1):
-        shift_type = "新班组-连续倒排" if shift["is_new"] else "老班组-连续正排"
+        shift_type = "新班组-连续正排" if shift["is_new"] else "老班组-连续正排"
         shift["name"] = f"班组{display_no}({shift_type})"
 
     # 新班组启动前不视为放空；第一天实际生产之前保持空白。
