@@ -1268,6 +1268,11 @@ def schedule_engine(
 
         def source_candidates(target_shift, target_day_idx):
             candidates = []
+            target_shift_pos = old_shifts.index(target_shift)
+
+            for other_shift in old_shifts[target_shift_pos + 1:]:
+                if numeric_prod(other_shift["daily_prod"][target_day_idx]) > 0:
+                    candidates.append((other_shift, target_day_idx))
 
             for source_day_idx in production_workday_indices:
                 if source_day_idx <= target_day_idx:
@@ -1275,9 +1280,7 @@ def schedule_engine(
                 if numeric_prod(target_shift["daily_prod"][source_day_idx]) > 0:
                     candidates.append((target_shift, source_day_idx))
 
-            for other_shift in old_shifts:
-                if id(other_shift) == id(target_shift):
-                    continue
+            for other_shift in old_shifts[target_shift_pos + 1:]:
                 for source_day_idx in production_workday_indices:
                     if source_day_idx <= target_day_idx:
                         continue
@@ -1324,6 +1327,53 @@ def schedule_engine(
                         moved = True
 
         return moved_total
+
+    def rebuild_old_shifts_by_priority():
+        nonlocal daily_scheduled, remaining_demand
+
+        if not material_enabled:
+            return 0
+
+        old_shifts = [shift for shift in shifts_production if not shift["is_new"]]
+        if not old_shifts:
+            return 0
+
+        new_daily = [
+            sum(numeric_prod(shift["daily_prod"][day_idx]) for shift in shifts_production if shift["is_new"])
+            for day_idx in range(total_days)
+        ]
+        new_total = sum(int(v) for v in new_daily)
+        old_target = max(0, int(production_target) - int(new_total))
+
+        for shift in old_shifts:
+            shift["daily_prod"] = [""] * total_days
+
+        daily_scheduled = new_daily[:]
+        remaining_old_qty = int(old_target)
+        scheduled_old_qty = 0
+
+        for shift in old_shifts:
+            if remaining_old_qty <= 0:
+                break
+            for day_idx in production_workday_indices:
+                if remaining_old_qty <= 0:
+                    break
+                day_capacity = int(daily_shift_capacity[day_idx])
+                if day_capacity <= 0:
+                    continue
+                available_qty = available_material_for_day(day_idx)
+                if available_qty <= 0:
+                    continue
+                prod_qty = min(day_capacity, available_qty, remaining_old_qty)
+                if prod_qty <= 0:
+                    continue
+                set_shift_day_value(shift, day_idx, prod_qty)
+                daily_scheduled[day_idx] += int(prod_qty)
+                remaining_old_qty -= int(prod_qty)
+                scheduled_old_qty += int(prod_qty)
+
+        remaining_demand = max(0, int(production_target) - int(new_total) - int(scheduled_old_qty))
+        return scheduled_old_qty
 
     def normalize_shift_idle_display():
         daily_scheduled_snapshot = [
@@ -1665,6 +1715,8 @@ def schedule_engine(
         pull_later_production_into_old_idle_slots()
         prioritize_old_shifts_and_cap_material()
         fill_old_shifts_forward_to_target()
+        prioritize_old_shifts_and_cap_material()
+        rebuild_old_shifts_by_priority()
         prioritize_old_shifts_and_cap_material()
     normalize_shift_idle_display()
 
