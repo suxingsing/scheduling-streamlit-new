@@ -1326,16 +1326,33 @@ def schedule_engine(
         return moved_total
 
     def normalize_shift_idle_display():
+        daily_scheduled_snapshot = [
+            sum(numeric_prod(item["daily_prod"][day_idx]) for item in shifts_production)
+            for day_idx in range(total_days)
+        ]
         for shift in shifts_production:
             if is_shift_empty(shift["daily_prod"]):
                 continue
             if shift["is_new"]:
                 continue
+            produced_indices = [
+                idx for idx, val in enumerate(shift["daily_prod"])
+                if isinstance(val, (int, float)) and int(val) > 0
+            ]
+            last_prod_idx = produced_indices[-1] if produced_indices else -1
             for day_idx in production_workday_indices:
                 if int(daily_shift_capacity[day_idx]) <= 0:
                     continue
+                if last_prod_idx >= 0 and day_idx > last_prod_idx:
+                    continue
                 if str(shift["daily_prod"][day_idx]).strip() == "":
-                    shift["daily_prod"][day_idx] = "当日放空"
+                    available_qty = max(
+                        0,
+                        material_available_at_day_start(day_idx, daily_scheduled_snapshot)
+                        - int(daily_scheduled_snapshot[day_idx])
+                    )
+                    if available_qty <= 0:
+                        shift["daily_prod"][day_idx] = "当日放空"
 
     def convert_non_continuous_old_shifts_to_new():
         nonlocal daily_scheduled, remaining_demand, final_shift_total, run_mode, message
@@ -1723,7 +1740,7 @@ def schedule_engine(
             if shift["daily_prod"][day_idx] == "当日放空":
                 shift["daily_prod"][day_idx] = ""
 
-    # 显示层标记：班组后续不再生产时，需等最后产出完成 Lead Time 转化后才标记释放。
+    # 显示层标记：班组后续不再生产时，只在第一个有效工作日标记释放。
     for shift in final_shifts:
         if shift["is_new"]:
             continue
@@ -1734,10 +1751,8 @@ def schedule_engine(
         if not produced_indices:
             continue
         last_prod_idx = produced_indices[-1]
-        release_date = get_next_workday(full_date_list[last_prod_idx], int(lead_time_days), rest_dates_set)
-        release_start_idx = date_to_idx.get(release_date, total_days)
         release_marked = False
-        for day_idx in range(max(last_prod_idx + 1, release_start_idx), total_days):
+        for day_idx in range(last_prod_idx + 1, total_days):
             if not date_workday_flag[day_idx] or int(daily_shift_capacity[day_idx]) <= 0:
                 continue
             current_val = shift["daily_prod"][day_idx]
