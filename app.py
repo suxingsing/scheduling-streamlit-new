@@ -1647,6 +1647,8 @@ def schedule_engine(
             prioritize_old_shifts_and_cap_material()
         pull_later_production_into_old_idle_slots()
         prioritize_old_shifts_and_cap_material()
+        fill_old_shifts_forward_to_target()
+        prioritize_old_shifts_and_cap_material()
     normalize_shift_idle_display()
 
     # ============================
