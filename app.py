@@ -1230,6 +1230,108 @@ def schedule_engine(
         remaining_demand = remaining_qty
         return filled_qty
 
+    def pull_later_production_into_old_idle_slots():
+        nonlocal daily_scheduled
+
+        if not material_enabled:
+            return 0
+
+        old_shifts = [shift for shift in shifts_production if not shift["is_new"]]
+        if not old_shifts:
+            return 0
+
+        daily_scheduled = [
+            sum(numeric_prod(shift["daily_prod"][day_idx]) for shift in shifts_production)
+            for day_idx in range(total_days)
+        ]
+        moved_total = 0
+
+        def material_plan_is_feasible(candidate_daily):
+            for check_idx in range(total_days):
+                if int(candidate_daily[check_idx]) > material_available_at_day_start(check_idx, candidate_daily):
+                    return False
+            return True
+
+        def max_feasible_move(target_day_idx, source_day_idx, limit_qty):
+            low = 0
+            high = int(limit_qty)
+            while low < high:
+                mid = (low + high + 1) // 2
+                candidate_daily = daily_scheduled[:]
+                candidate_daily[target_day_idx] += mid
+                candidate_daily[source_day_idx] -= mid
+                if material_plan_is_feasible(candidate_daily):
+                    low = mid
+                else:
+                    high = mid - 1
+            return low
+
+        def source_candidates(target_shift, target_day_idx):
+            candidates = []
+
+            for source_day_idx in production_workday_indices:
+                if source_day_idx <= target_day_idx:
+                    continue
+                if numeric_prod(target_shift["daily_prod"][source_day_idx]) > 0:
+                    candidates.append((target_shift, source_day_idx))
+
+            for other_shift in old_shifts:
+                if id(other_shift) == id(target_shift):
+                    continue
+                for source_day_idx in production_workday_indices:
+                    if source_day_idx <= target_day_idx:
+                        continue
+                    if numeric_prod(other_shift["daily_prod"][source_day_idx]) > 0:
+                        candidates.append((other_shift, source_day_idx))
+
+            for new_shift in [shift for shift in shifts_production if shift["is_new"]]:
+                for source_day_idx in production_workday_indices:
+                    if source_day_idx < target_day_idx:
+                        continue
+                    if numeric_prod(new_shift["daily_prod"][source_day_idx]) > 0:
+                        candidates.append((new_shift, source_day_idx))
+
+            return candidates
+
+        moved = True
+        while moved:
+            moved = False
+            for target_day_idx in production_workday_indices:
+                day_capacity = int(daily_shift_capacity[target_day_idx])
+                if day_capacity <= 0:
+                    continue
+
+                for target_shift in old_shifts:
+                    target_qty = numeric_prod(target_shift["daily_prod"][target_day_idx])
+                    target_room = max(0, day_capacity - target_qty)
+                    if target_room <= 0:
+                        continue
+
+                    for source_shift, source_day_idx in source_candidates(target_shift, target_day_idx):
+                        if target_room <= 0:
+                            break
+                        source_qty = numeric_prod(source_shift["daily_prod"][source_day_idx])
+                        if source_qty <= 0:
+                            continue
+                        move_qty = max_feasible_move(target_day_idx, source_day_idx, min(target_room, source_qty))
+                        if move_qty <= 0:
+                            continue
+
+                        target_qty += move_qty
+                        source_qty -= move_qty
+                        set_shift_day_value(target_shift, target_day_idx, target_qty)
+                        if source_shift["is_new"] and source_qty <= 0:
+                            source_shift["daily_prod"][source_day_idx] = ""
+                        else:
+                            set_shift_day_value(source_shift, source_day_idx, source_qty)
+                        daily_scheduled[target_day_idx] += move_qty
+                        daily_scheduled[source_day_idx] -= move_qty
+                        target_room -= move_qty
+                        moved_total += move_qty
+                        moved = True
+
+        return moved_total
+
     def normalize_shift_idle_display():
         for shift in shifts_production:
             if is_shift_empty(shift["daily_prod"]):
@@ -1548,6 +1650,8 @@ def schedule_engine(
             prioritize_old_shifts_and_cap_material()
             convert_last_old_shift_to_new_if_delay_exceeds()
             prioritize_old_shifts_and_cap_material()
+        pull_later_production_into_old_idle_slots()
+        prioritize_old_shifts_and_cap_material()
     normalize_shift_idle_display()
 
     # ============================
